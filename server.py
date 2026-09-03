@@ -2,21 +2,22 @@ import os
 import math
 import json
 import requests
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import OpenAI
 from elevenlabs.client import ElevenLabs
 
-# --- CLÉS API ---
-OPENAI_API_KEY = "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"
-ELEVENLABS_API_KEY = "sk_026bfc79a7632eb4102ba554010198b1b41086aa8b26ddfa"
+# --- CLÉS API (Lecture sécurisée depuis l'environnement Render ou local) ---
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "sk_026bfc79a7632eb4102ba554010198b1b41086aa8b26ddfa")
 
 client_openai = OpenAI(api_key=OPENAI_API_KEY)
 client_eleven = ElevenLabs(api_key=ELEVENLABS_API_KEY)
 
-VOICE_ID = "JBFqnCBsd6RMkjVDRZzb"  # ID de la voix ElevenLabs David
+# ID de la voix "George" (100% autorisée via API gratuite)
+VOICE_ID = "JBFqnCBsd6RMkjVDRZzb"
 
 app = FastAPI()
 
@@ -60,7 +61,7 @@ quiz_state = {
 }
 
 def generer_audio_elevenlabs(texte: str, output_path: str = "latest_story.mp3"):
-    """Génère un fichier audio ultra-réaliste via ElevenLabs avec gestion de version SDK"""
+    """Génère un fichier audio ultra-réaliste via ElevenLabs"""
     try:
         audio = client_eleven.text_to_speech.convert(
             text=texte,
@@ -126,7 +127,7 @@ async def reset_session():
 
 # --- MODE 1 : AUDIO GUIDE ---
 @app.post("/get_story")
-async def generate_story(req: LocationRequest):
+async def generate_story(req: LocationRequest, request: Request):
     global session_state
     try:
         lat, lon = req.latitude, req.longitude
@@ -184,7 +185,7 @@ Rédige une anecdote orale courte (40 mots max).
 
         return {
             "text": texte_guide,
-            "audio_url": "http://192.168.1.90:8000/get_audio",
+            "audio_url": f"{request.base_url}get_audio",
             "commune": commune
         }
 
@@ -194,7 +195,7 @@ Rédige une anecdote orale courte (40 mots max).
 
 # --- MODE 2 : QUIZ (QUESTION) ---
 @app.post("/get_quiz_question")
-async def get_quiz_question(req: LocationRequest):
+async def get_quiz_question(req: LocationRequest, request: Request):
     global quiz_state
     try:
         commune, wiki_summary = obtenir_infos_commune(req.latitude, req.longitude)
@@ -216,7 +217,7 @@ SOURCE OFFICIELLE : "{wiki_summary}"
 HISTORIQUE DES QUESTIONS DÉJÀ POSÉES (À NE PAS RÉPÉTER) :
 {historique_quiz}
 
-Propose une NOUVELLE question originale et интересante.
+Propose une NOUVELLE question originale et intéressante.
 Renvoie un objet JSON :
 {{
   "question": "La question + phrase d'attente",
@@ -244,7 +245,7 @@ Renvoie un objet JSON :
 
         return {
             "text": question_text,
-            "audio_url": "http://192.168.1.90:8000/get_audio"
+            "audio_url": f"{request.base_url}get_audio"
         }
 
     except Exception as e:
@@ -253,7 +254,7 @@ Renvoie un objet JSON :
 
 # --- MODE 2 : QUIZ (RÉPONSE) ---
 @app.post("/get_quiz_answer")
-async def get_quiz_answer():
+async def get_quiz_answer(request: Request):
     global quiz_state
     try:
         reponse_text = quiz_state.get("current_answer", "Je n'ai pas retrouvé la réponse.")
@@ -262,7 +263,7 @@ async def get_quiz_answer():
 
         return {
             "text": reponse_text,
-            "audio_url": "http://192.168.1.90:8000/get_audio"
+            "audio_url": f"{request.base_url}get_audio"
         }
 
     except Exception as e:
@@ -271,7 +272,7 @@ async def get_quiz_answer():
 
 # --- INTERACTION VOCALE ---
 @app.post("/ask_question")
-async def ask_question(req: QuestionRequest):
+async def ask_question(req: QuestionRequest, request: Request):
     try:
         commune, wiki_summary = obtenir_infos_commune(req.latitude, req.longitude)
         
@@ -304,7 +305,7 @@ Réponds directement de manière concise (30 à 40 mots max).
 
         return {
             "text": texte_reponse,
-            "audio_url": "http://192.168.1.90:8000/get_audio"
+            "audio_url": f"{request.base_url}get_audio"
         }
 
     except Exception as e:
@@ -315,5 +316,7 @@ async def get_audio():
     return FileResponse("latest_story.mp3", media_type="audio/mpeg")
 
 # --- DEMARRAGE DU SERVEUR ---
-import uvicorn
-uvicorn.run(app, host="0.0.0.0", port=8000)
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
