@@ -52,39 +52,38 @@ quiz_state = {
     "quiz_history": []
 }
 
-def nettoyer_departement(dept_brut):
-    """Force la conversion pour interdire 'Pays de la Loire' comme nom de département."""
+def nettoyer_departement(dept_brut, postcode=""):
+    """Nettoie et valide le département pour n'importe quel endroit en France."""
+    if postcode and len(postcode) >= 2:
+        code_dept = postcode[:2]
+        # Gestion spécifique des départements français si besoin, ou on s'appuie sur le nom Nominatim
+        # Si le nom brut renvoyé est une Région (ex: Pays de la Loire, Bretagne), on nettoie
     if not dept_brut:
-        return "Loire-Atlantique"
+        return "France"
     
     d_low = dept_brut.lower()
-    if "pays de la loire" in d_low or "votre" in d_low or "département" in d_low:
-        return "Loire-Atlantique"
+    # Si Nominatim renvoie une région au lieu d'un département, on essaie d'isoler
+    regions_interdites = ["pays de la loire", "bretagne", "nouvelle-aquitaine", "occitanie", "grand est", 
+                          "hauts-de-france", "auvergne-rhône-alpes", "bourgogne-franche-comté", "centre-val de loire", 
+                          "normandie", "provence-alpes-côte d'azur", "île-de-france", "corse"]
+    
+    if any(reg in d_low for reg in regions_interdites):
+        # Si on a un code postal valide, on peut déduire le département par défaut ou garder le comté s'il existe
+        return "le département actuel"
     
     return dept_brut
 
 def extraction_infos_geo(addr):
-    """Extrait la commune et le département depuis OSM avec filtrage strict."""
-    commune = (addr.get('village') or addr.get('town') or addr.get('city') 
-               or addr.get('municipality') or addr.get('suburb') 
-               or addr.get('hamlet'))
+    """Extrait la localité/hamlet et le département partout en France avec précision."""
+    commune = (addr.get('hamlet') or addr.get('locality') or addr.get('suburb') 
+               or addr.get('village') or addr.get('town') or addr.get('city') 
+               or addr.get('municipality'))
     
+    # En France, OpenStreetMap stocke souvent le département dans 'county' ou 'state_district'
     departement = addr.get('county') or addr.get('state_district')
-    
     postcode = addr.get('postcode', '')
-    if postcode and len(postcode) >= 2:
-        code_dept = postcode[:2]
-        depts_map = {
-            "44": "Loire-Atlantique",
-            "49": "Maine-et-Loire",
-            "53": "Mayenne",
-            "72": "Sarthe",
-            "85": "Vendée"
-        }
-        if code_dept in depts_map:
-            departement = depts_map[code_dept]
 
-    departement = nettoyer_departement(departement)
+    departement = nettoyer_departement(departement, postcode)
 
     if commune:
         c_low = commune.lower()
@@ -94,14 +93,13 @@ def extraction_infos_geo(addr):
     return commune, departement
 
 def interroger_toutes_les_sources(lat, lon):
-    # En-tête personnalisé pour éviter les rejets 429 de Nominatim
-    headers = {'User-Agent': 'GuideAutoApp_PROD_v2/1.0 (contact_app@domain.com)'}
+    headers = {'User-Agent': 'GuideAutoApp_FR_v2/1.0 (contact_app@domain.com)'}
     commune = None
     departement = None
     
-    # SOURCE 1 : Reverse Geocoding OSM (Zoom 13 & 10)
+    # SOURCE 1 : Reverse Geocoding OSM (Zoom 14 pour les hameaux, puis 10 de secours)
     try:
-        url_osm = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=13&addressdetails=1"
+        url_osm = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=14&addressdetails=1"
         res = requests.get(url_osm, headers=headers, timeout=4)
         if res.status_code == 200:
             addr = res.json().get('address', {})
@@ -120,8 +118,6 @@ def interroger_toutes_les_sources(lat, lon):
                 if not departement: departement = d_tmp
         except Exception as e:
             print(f"Erreur OSM Zoom 10: {e}")
-
-    departement = nettoyer_departement(departement)
 
     # SOURCE 2 : Base Mérimée (Monuments Historiques)
     monuments_merimee = []
@@ -222,7 +218,7 @@ async def generate_story(req: LocationRequest, request: Request):
                 consigne_position = f"TOUTE PREMIÈRE INTERVENTION : Commence exactement par 'Bienvenue dans le département de {departement}.'"
         elif commune and session_state["current_commune"] != commune:
             ancienne = session_state["current_commune"]
-            consigne_position = f"Changement de commune : Commence exactement par 'Nous venons de quitter {ancienne} et entrons dans la commune de {commune}.'"
+            consigne_position = f"Changement de commune : Commence exactement par 'Nous venons de quitter {ancienne} et entrons dans le secteur de {commune}.'"
             session_state["queue_categories"] = list(CATEGORIES_BASE)
 
         session_state["current_commune"] = commune if commune else session_state["current_commune"]
@@ -235,15 +231,15 @@ async def generate_story(req: LocationRequest, request: Request):
         historique_texte = "\n".join([f"- {h}" for h in session_state["stories_history"]]) if session_state["stories_history"] else "Aucune."
 
         system_instruction = f"""
-Tu es un guide vocal touristique et historique captivant, direct et très bien documenté.
+Tu es un guide vocal touristique et historique captivant, direct et très bien documenté, opérationnel partout en France.
 
 RÈGLES STRICTES DE NARRATION ET DE GÉOGRAPHIE :
 1. ACCROCHE : {consigne_position}
-2. INTERDICTION STRICTE 'PAYS DE LA LOIRE' : 'Pays de la Loire' est une Région. Il est STRICTEMENT INTERDIT de dire 'le département des Pays de la Loire'. Le département est OBLIGATOIREMENT '{departement}'.
-3. DIVERSIFICATION DÉPARTEMENTALE : La commune ({commune}) sert uniquement d'amorce géographique. Il est INTERDIT de bloquer l'anecdote uniquement sur {commune} ou Le Pallet. Raconte un événement, une bataille, une tradition ou un monument situé AILLEURS dans le département de {departement} (ex: Nantes, Clisson, Guérande, la Sèvre Nantaise, le Pays de Retz, le vignoble du Muscadet).
+2. PRÉCISION GÉOGRAPHIQUE STRICTE : Tu dois impérativement respecter le département réel où se trouve l'utilisateur : '{departement}'. Ne confonds jamais les départements limitrophes (par exemple, ne situe jamais un lieu de Vendée en Loire-Atlantique ou inversement).
+3. DIVERSIFICATION LOCALE : La localité/commune ({commune}) sert d'amorce d'arrivée. Raconte un événement, une bataille, une tradition ou un monument situé dans ce même département de {departement}.
 4. CROISEMENT DE SOURCES : Utilise au moins 2 sources parmi les 4 fournies.
 5. STYLE FACTUEL :
-   - Donne des DATES, DES NOMS PROPRES et DES LIEUX DÉPARTEMENTAUX PRÉCIS.
+   - Donne des DATES, DES NOMS PROPRES et des lieux précis du département.
    - Pas de questions rhétoriques ("Saviez-vous que...").
    - Ne dis jamais "votre secteur" ou "votre département".
 6. ANTI-RÉPÉTITION : Ne répète jamais ce qui a été dit :
@@ -252,7 +248,7 @@ RÈGLES STRICTES DE NARRATION ET DE GÉOGRAPHIE :
 """
 
         user_prompt = f"""
-Commune d'amorce : {commune if commune else 'Non spécifiée'}
+Lieu précis d'amorce : {commune if commune else 'Non spécifié'}
 Département réel : {departement}
 Thème imposé : {categorie_cible}
 
@@ -260,7 +256,7 @@ SOURCE 1 (Mérimée) : "{src_merimee}"
 SOURCE 2 (Overpass) : "{src_overpass}"
 SOURCE 3 (Wikipédia) : "{src_wiki}"
 
-CONSIGNE : Rédige une anecdote sur le thème "{categorie_cible}" en piochant dans le patrimoine global du DÉPARTEMENT {departement}, tout en respectant l'amorce demandée citant la commune de {commune}. Noms propres et dates exigés.
+CONSIGNE : Rédige une anecdote sur le thème "{categorie_cible}" ancrée strictement dans le département {departement}, en respectant l'amorce citant la localité {commune}. Noms propres et dates exigés.
 """
 
         response_text = client_openai.chat.completions.create(
@@ -292,7 +288,7 @@ async def get_quiz_question(req: LocationRequest, request: Request):
         historique_quiz = "\n".join([f"- {q}" for q in quiz_state["quiz_history"]]) if quiz_state["quiz_history"] else "Aucune."
 
         system_instruction = f"""
-Tu es un animateur de quiz exigeant. Pose une question précise sur l'histoire, la gastronomie, la géographie ou le patrimoine du département {departement}.
+Tu es un animateur de quiz exigeant en France. Pose une question précise sur l'histoire, la gastronomie, la géographie ou le patrimoine du département actuel : {departement}.
 
 RÈGLES STRICTES DE FIN DE QUESTION :
 1. INTERDICTION FORMELLE DE RÉPÉTER TOUJOURS LA MÊME FORMULE (bannis le systématique "je vous laisse 10 secondes").
@@ -311,8 +307,8 @@ Ne pose JAMAIS une question similaire ou déjà posée dans cet historique de qu
 FORMAT : Renvoie un objet JSON strict.
 """
         user_prompt = f"""
-Département : {departement}
-Commune : {commune}
+Département réel : {departement}
+Lieu précis : {commune}
 Données :
 - Mérimée : {src_m}
 - Overpass : {src_o}
@@ -364,7 +360,7 @@ async def ask_question(req: QuestionRequest, request: Request):
         dernier_sujet = session_state["stories_history"][-1] if session_state["stories_history"] else "Aucun sujet récent."
 
         system_instruction = f"""
-Tu es un guide vocal réactif.
+Tu es un guide vocal réactif partout en France.
 
 RÈGLES STRICTES :
 1. Si l'utilisateur demande où il se trouve : Réponds précisément qu'il est à {commune if commune else 'sa position actuelle'}, dans le département de {departement}.
@@ -373,8 +369,8 @@ RÈGLES STRICTES :
 """
 
         prompt = f"""
-Commune : {commune}
-Département : {departement}
+Lieu précis : {commune}
+Département réel : {departement}
 Sources : {src_m} | {src_o} | {src_w}
 Dernier sujet : "{dernier_sujet}"
 Question utilisateur : "{req.question}"
