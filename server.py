@@ -3,19 +3,12 @@ import math
 import json
 import requests
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import OpenAI
-from elevenlabs.client import ElevenLabs
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "sk_026bfc79a7632eb4102ba554010198b1b41086aa8b26ddfa")
-
 client_openai = OpenAI(api_key=OPENAI_API_KEY)
-client_eleven = ElevenLabs(api_key=ELEVENLABS_API_KEY)
-
-VOICE_ID = "JBFqnCBsd6RMkjVDRZzb"
 
 app = FastAPI()
 
@@ -30,7 +23,7 @@ app.add_middleware(
 class LocationRequest(BaseModel):
     latitude: float
     longitude: float
-    heading: float = -1.0  # Cap GPS en degrés (0-360)
+    heading: float = -1.0
 
 class QuestionRequest(BaseModel):
     latitude: float
@@ -58,28 +51,7 @@ quiz_state = {
     "quiz_history": []
 }
 
-def generer_audio_elevenlabs(texte: str, output_path: str = "latest_story.mp3"):
-    try:
-        audio = client_eleven.text_to_speech.convert(
-            text=texte,
-            voice_id=VOICE_ID,
-            model_id="eleven_multilingual_v2"
-        )
-        with open(output_path, "wb") as f:
-            for chunk in audio:
-                f.write(chunk)
-    except Exception:
-        audio_generator = client_eleven.generate(
-            text=texte,
-            voice=VOICE_ID,
-            model="eleven_multilingual_v2"
-        )
-        with open(output_path, "wb") as f:
-            for chunk in audio_generator:
-                f.write(chunk)
-
 def calculer_point_en_avant(lat, lon, heading, distance_km=3.0):
-    """ Calcule une position GPS projetée devant le véhicule selon son cap """
     if heading < 0:
         return lat, lon
     
@@ -103,7 +75,6 @@ def obtenir_infos_locales(lat, lon, heading=-1.0, elargir_trajectoire=False):
     headers = {'User-Agent': 'GuideAutoApp/1.0 (contact@example.com)'}
     commune = None
     
-    # 1. OpenStreetMap : Détection de la commune actuelle
     url_osm = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=13"
     try:
         res = requests.get(url_osm, headers=headers, timeout=3).json()
@@ -115,7 +86,6 @@ def obtenir_infos_locales(lat, lon, heading=-1.0, elargir_trajectoire=False):
     if not commune:
         commune = "cette localité"
 
-    # Détection de la commune à venir sur la trajectoire (si élargissement)
     commune_a_venir = None
     if elargir_trajectoire and heading >= 0:
         lat_fwd, lon_fwd = calculer_point_en_avant(lat, lon, heading, distance_km=4.0)
@@ -127,7 +97,6 @@ def obtenir_infos_locales(lat, lon, heading=-1.0, elargir_trajectoire=False):
         except Exception as e:
             print(f"Erreur OSM Trajectoire: {e}")
 
-    # 2. Source Wikipedia commune actuelle
     wiki_summary = ""
     try:
         url_wiki = f"https://fr.wikipedia.org/api/rest_v1/page/summary/{commune}"
@@ -137,7 +106,6 @@ def obtenir_infos_locales(lat, lon, heading=-1.0, elargir_trajectoire=False):
     except Exception as e:
         print(f"Erreur Wikipedia: {e}")
 
-    # Source Wikipedia commune à venir
     wiki_summary_a_venir = ""
     if commune_a_venir and commune_a_venir != commune:
         try:
@@ -148,7 +116,6 @@ def obtenir_infos_locales(lat, lon, heading=-1.0, elargir_trajectoire=False):
         except Exception as e:
             print(f"Erreur Wikipedia Trajectoire: {e}")
 
-    # 3. Source Base Mérimée (Ministère de la Culture)
     monuments_merimee = []
     try:
         url_merimee = f"https://data.culture.gouv.fr/api/records/1.0/search/?dataset=liste-des-immeubles-proteges-au-titre-des-monuments-historiques&geofilter.distance={lat}%2C{lon}%2C5000&rows=3"
@@ -165,7 +132,6 @@ def obtenir_infos_locales(lat, lon, heading=-1.0, elargir_trajectoire=False):
 
     source_merimee_txt = f"Monuments officiellement classés aux alentours : {', '.join(monuments_merimee)}" if monuments_merimee else "Aucun monument classé Mérimée dans un rayon proche."
 
-    # 4. Source Overpass (Lieux proches + Horaires)
     lieux_proches = []
     try:
         overpass_query = f"""
@@ -287,13 +253,10 @@ Rédige une anecdote orale courte (35-40 mots max) basée sur ces sources.
             temperature=0.1
         )
         texte_guide = response_text.choices[0].message.content
-
         session_state["stories_history"].append(texte_guide)
-        generer_audio_elevenlabs(texte_guide)
 
         return {
             "text": texte_guide,
-            "audio_url": f"{request.base_url}get_audio",
             "commune": commune
         }
 
@@ -335,11 +298,8 @@ Renvoie un JSON :
         quiz_state["current_answer"] = data.get("reponse", "")
         question_text = data.get("question", "")
 
-        generer_audio_elevenlabs(question_text)
-
         return {
-            "text": question_text,
-            "audio_url": f"{request.base_url}get_audio"
+            "text": question_text
         }
 
     except Exception as e:
@@ -349,10 +309,8 @@ Renvoie un JSON :
 async def get_quiz_answer(request: Request):
     global quiz_state
     reponse_text = quiz_state.get("current_answer", "Information non disponible.")
-    generer_audio_elevenlabs(reponse_text)
     return {
-        "text": reponse_text,
-        "audio_url": f"{request.base_url}get_audio"
+        "text": reponse_text
     }
 
 @app.post("/ask_question")
@@ -397,19 +355,12 @@ Question orale de l'utilisateur : "{req.question}"
         )
         texte_reponse = response_text.choices[0].message.content
 
-        generer_audio_elevenlabs(texte_reponse)
-
         return {
-            "text": texte_reponse,
-            "audio_url": f"{request.base_url}get_audio"
+            "text": texte_reponse
         }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/get_audio")
-async def get_audio():
-    return FileResponse("latest_story.mp3", media_type="audio/mpeg")
 
 if __name__ == "__main__":
     import uvicorn
