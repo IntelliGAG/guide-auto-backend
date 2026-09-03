@@ -94,7 +94,7 @@ def extraction_infos_geo(addr):
     return commune, departement
 
 def interroger_toutes_les_sources(lat, lon):
-    # En-tête personnalisé pour éviter les rejets 429 / Too Many Requests de Nominatim
+    # En-tête personnalisé pour éviter les rejets 429 de Nominatim
     headers = {'User-Agent': 'GuideAutoApp_PROD_v2/1.0 (contact_app@domain.com)'}
     commune = None
     departement = None
@@ -240,7 +240,7 @@ Tu es un guide vocal touristique et historique captivant, direct et très bien d
 RÈGLES STRICTES DE NARRATION ET DE GÉOGRAPHIE :
 1. ACCROCHE : {consigne_position}
 2. INTERDICTION STRICTE 'PAYS DE LA LOIRE' : 'Pays de la Loire' est une Région. Il est STRICTEMENT INTERDIT de dire 'le département des Pays de la Loire'. Le département est OBLIGATOIREMENT '{departement}'.
-3. DIVERSIFICATION DÉPARTEMENTALE : La commune ({commune}) sert uniquement d'amorce géographique. Il est INTERDIT de bloquer l'anecdote uniquement sur {commune}. Raconte un événement, une bataille, une tradition ou un monument situé AILLEURS dans le département de {departement} (ex: Nantes, Clisson, Guérande, la Sèvre Nantaise, le Pays de Retz, le vignoble du Muscadet).
+3. DIVERSIFICATION DÉPARTEMENTALE : La commune ({commune}) sert uniquement d'amorce géographique. Il est INTERDIT de bloquer l'anecdote uniquement sur {commune} ou Le Pallet. Raconte un événement, une bataille, une tradition ou un monument situé AILLEURS dans le département de {departement} (ex: Nantes, Clisson, Guérande, la Sèvre Nantaise, le Pays de Retz, le vignoble du Muscadet).
 4. CROISEMENT DE SOURCES : Utilise au moins 2 sources parmi les 4 fournies.
 5. STYLE FACTUEL :
    - Donne des DATES, DES NOMS PROPRES et DES LIEUX DÉPARTEMENTAUX PRÉCIS.
@@ -289,7 +289,27 @@ async def get_quiz_question(req: LocationRequest, request: Request):
     try:
         commune, departement, src_m, src_o, src_w = interroger_toutes_les_sources(req.latitude, req.longitude)
         
-        system_instruction = f"Tu es un animateur de quiz. Pose une question précise sur l'histoire, la gastronomie, la géographie ou le patrimoine du département {departement}."
+        historique_quiz = "\n".join([f"- {q}" for q in quiz_state["quiz_history"]]) if quiz_state["quiz_history"] else "Aucune."
+
+        system_instruction = f"""
+Tu es un animateur de quiz exigeant. Pose une question précise sur l'histoire, la gastronomie, la géographie ou le patrimoine du département {departement}.
+
+RÈGLES STRICTES DE FIN DE QUESTION :
+1. INTERDICTION FORMELLE DE RÉPÉTER TOUJOURS LA MÊME FORMULE (bannis le systématique "je vous laisse 10 secondes").
+2. VARIE OBLIGATOIREMENT la phrase de conclusion de la question en piochant parmi ces exemples ou en inventant des variantes similaires et naturelles :
+   - "Alors, vous avez une idée ?"
+   - "J'attends votre réponse !"
+   - "À tout de suite pour la bonne réponse."
+   - "À vous de jouer, je vous écoute."
+   - "Voyons si vous séchez sur celle-là !"
+   - "Réfléchissez bien, je reviens avec la réponse."
+
+RÈGLE STRICTE ANTI-RÉPÉTITION DE QUESTION : 
+Ne pose JAMAIS une question similaire ou déjà posée dans cet historique de quiz :
+{historique_quiz}
+
+FORMAT : Renvoie un objet JSON strict.
+"""
         user_prompt = f"""
 Département : {departement}
 Commune : {commune}
@@ -300,7 +320,7 @@ Données :
 
 Renvoie un JSON :
 {{
-  "question": "Question de quiz précise sur le département {departement} + Je vous laisse 10 secondes !",
+  "question": "Nouvelle question de quiz inédite sur le département {departement} + une phrase de conclusion variée !",
   "reponse": "Explication factuelle précise avec dates et noms propres."
 }}
 """
@@ -312,12 +332,14 @@ Renvoie un JSON :
                 {"role": "user", "content": user_prompt}
             ],
             response_format={"type": "json_object"},
-            temperature=0.2
+            temperature=0.6
         )
         
         data = json.loads(response.choices[0].message.content)
         quiz_state["current_answer"] = data.get("reponse", "")
         question_text = data.get("question", "")
+        
+        quiz_state["quiz_history"].append(question_text)
 
         return {
             "text": question_text
