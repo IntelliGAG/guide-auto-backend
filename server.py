@@ -115,7 +115,7 @@ def interroger_toutes_les_sources(lat, lon):
     # SOURCE 2 : Base Mérimée (Ministère de la Culture - Monuments Historiques)
     monuments_merimee = []
     try:
-        url_merimee = f"https://data.culture.gouv.fr/api/records/1.0/search/?dataset=liste-des-immeubles-proteges-au-titre-des-monuments-historiques&geofilter.distance={lat}%2C{lon}%2C5000&rows=3"
+        url_merimee = f"https://data.culture.gouv.fr/api/records/1.0/search/?dataset=liste-des-immeubles-proteges-au-titre-des-monuments-historiques&geofilter.distance={lat}%2C{lon}%2C8000&rows=3"
         res_m = requests.get(url_merimee, headers=headers, timeout=3)
         if res_m.status_code == 200:
             records = res_m.json().get('records', [])
@@ -127,7 +127,7 @@ def interroger_toutes_les_sources(lat, lon):
     except Exception as e:
         print(f"Erreur Mérimée: {e}")
 
-    source_merimee_txt = f"Monuments classés Mérimée proches : {', '.join(monuments_merimee)}" if monuments_merimee else "Aucun monument Mérimée immédiat."
+    source_merimee_txt = f"Monuments classés proches : {', '.join(monuments_merimee)}" if monuments_merimee else "Aucun monument spécifique sur ce point."
 
     # SOURCE 3 : Overpass API (Lieux d'intérêt & patrimoine OSM)
     lieux_overpass = []
@@ -135,10 +135,10 @@ def interroger_toutes_les_sources(lat, lon):
         overpass_query = f"""
         [out:json][timeout:3];
         (
-          node["historic"](around:1500,{lat},{lon});
-          way["historic"](around:1500,{lat},{lon});
-          node["tourism"="attraction"](around:1500,{lat},{lon});
-          node["waterway"](around:1500,{lat},{lon});
+          node["historic"](around:2000,{lat},{lon});
+          way["historic"](around:2000,{lat},{lon});
+          node["tourism"="attraction"](around:2000,{lat},{lon});
+          node["waterway"](around:2000,{lat},{lon});
         );
         out body 3;
         """
@@ -153,11 +153,11 @@ def interroger_toutes_les_sources(lat, lon):
     except Exception as e:
         print(f"Erreur Overpass: {e}")
 
-    source_overpass_txt = f"Lieux/Points d'intérêt Overpass proches : {', '.join(lieux_overpass)}" if lieux_overpass else "Aucun lieu Overpass immédiat."
+    source_overpass_txt = f"Points d'intérêt Overpass : {', '.join(lieux_overpass)}" if lieux_overpass else "Aucun lieu Overpass immédiat."
 
-    # SOURCE 4 : Wikipédia API (Extrait local ou départemental)
+    # SOURCE 4 : Wikipédia API (Focus prioritaire sur le Département)
     wiki_context = ""
-    target_search = commune or departement
+    target_search = departement or commune
     if target_search:
         try:
             url_wiki = f"https://fr.wikipedia.org/api/rest_v1/page/summary/{target_search}"
@@ -195,7 +195,7 @@ async def generate_story(req: LocationRequest, request: Request):
         lat, lon = req.latitude, req.longitude
         commune, departement, src_merimee, src_overpass, src_wiki = interroger_toutes_les_sources(lat, lon)
 
-        # Consigne d'accroche et de géolocalisation
+        # Formulations de localisation
         consigne_position = ""
         if session_state["current_commune"] is None:
             if commune and departement:
@@ -205,7 +205,7 @@ async def generate_story(req: LocationRequest, request: Request):
             elif departement:
                 consigne_position = f"TOUTE PREMIÈRE INTERVENTION : Commence exactement par 'Bienvenue dans le département de {departement}.'"
             else:
-                consigne_position = "TOUTE PREMIÈRE INTERVENTION : Entre directement dans le récit avec un fait historique précis."
+                consigne_position = "TOUTE PREMIÈRE INTERVENTION : Entre directement dans le récit avec un fait historique départemental précis."
         elif commune and session_state["current_commune"] != commune:
             ancienne = session_state["current_commune"]
             consigne_position = f"Changement de commune : Commence exactement par 'Nous venons de quitter {ancienne} et entrons dans la commune de {commune}.'"
@@ -223,30 +223,29 @@ async def generate_story(req: LocationRequest, request: Request):
         system_instruction = f"""
 Tu es un guide vocal touristique et historique captivant, direct et très bien documenté.
 
-RÈGLES STRICTES DE CROISEMENT DE SOURCES ET DE STYLE :
+RÈGLES DE NARRATION ET ÉLARGISSEMENT DÉPARTEMENTAL :
 1. ACCROCHE : {consigne_position}
-2. OBLIGATION DE CROISEMENT : Tu reçois 4 sources de données ci-dessous. Tu dois IMPÉRATIVEMENT croiser au moins 2 sources dans ton récit (par exemple lier un monument de la source Mérimée/Overpass avec l'histoire Wikipédia, ou lier le terroir du département avec un lieu proche).
-3. ÉLARGISSEMENT DÉPARTEMENTAL : Tu connais la commune actuelle ({commune if commune else 'locale'}), mais si les données locales sont minces, élargis ton anecdote à l'ensemble du département de {departement if departement else 'la région'}.
-4. INTERDICTION DU STYLE FLOU ET RHÉTORIQUE :
-   - Pas de questions ("Saviez-vous que...", "Connaissez-vous...").
-   - Pas de phrases creuses ("il y a eu plusieurs batailles", "une riche histoire"). Donne des DATES, DES NOMS PROPRES et DES LIEUX PRÉCIS.
-   - Ne dis JAMAIS "votre secteur" ou "votre département".
+2. PORTÉE DÉPARTEMENTALE OBLIGATOIRE : L'utilisateur se trouve dans la commune de '{commune if commune else 'locale'}' située dans le département '{departement if departement else 'actuel'}'. Tu peux et DOIS aborder des sujets historiques, des monuments, des faits d'armes, la gastronomie ou les paysages provenant de TOUT LE DÉPARTEMENT DE {departement}, et pas seulement restreints à la commune exacte.
+3. CROISEMENT DE SOURCES : Utilise au moins 2 sources parmi celles fournies (Mérimée, Overpass, Wikipédia ou ta culture générale sur {departement}).
+4. STYLE DIRECT ET FACTUEL :
+   - Donne des DATES, DES NOMS PROPRES, DES PERSONNAGES HISTORIQUES et DES LIEUX DÉPARTEMENTAUX PRÉCIS.
+   - Pas de questions rhétoriques ("Saviez-vous que...").
+   - Ne dis jamais "votre secteur" ou "votre département".
 5. ANTI-RÉPÉTITION : Ne répète jamais ce qui a été dit :
 {historique_texte}
-6. FORMAT : 40 à 50 mots max, dynamique et oral.
+6. FORMAT : 40 à 50 mots max, oral et captivant.
 """
 
         user_prompt = f"""
-Commune actuelle : {commune if commune else 'Non spécifiée'}
-Département : {departement if departement else 'Non spécifié'}
-Thème : {categorie_cible}
+Commune actuelle (point GPS) : {commune if commune else 'Non spécifiée'}
+Département global à traiter : {departement if departement else 'Non spécifié'}
+Thème imposé : {categorie_cible}
 
-SOURCE 1 (Mérimée - Culture) : "{src_merimee}"
-SOURCE 2 (Overpass - OSM) : "{src_overpass}"
-SOURCE 3 (Wikipédia) : "{src_wiki}"
-SOURCE 4 (Culture générale IA sur le département {departement}) : "Activer la connaissance sur l'histoire, les événements et le terroir de ce département."
+SOURCE 1 (Mérimée) : "{src_merimee}"
+SOURCE 2 (Overpass) : "{src_overpass}"
+SOURCE 3 (Wikipédia Départemental) : "{src_wiki}"
 
-CONSIGNE : Rédige une anecdote en croisant AU MOINS 2 SOURCES ci-dessus. Noms propres, dates et lieux requis.
+CONSIGNE : Rédige une anecdote sur le thème "{categorie_cible}" en piochant dans le patrimoine global du DÉPARTEMENT {departement}, tout en respectant l'amorce qui cite la commune de {commune}. Noms propres et dates exigés.
 """
 
         response_text = client_openai.chat.completions.create(
@@ -276,17 +275,18 @@ async def get_quiz_question(req: LocationRequest, request: Request):
         commune, departement, src_m, src_o, src_w = interroger_toutes_les_sources(req.latitude, req.longitude)
         cible = departement or commune or "la région"
         
-        system_instruction = f"Tu es un animateur de quiz. Pose une question précise en croisant les informations historiques et culturelles sur {cible}."
+        system_instruction = f"Tu es un animateur de quiz. Pose une question précise sur l'histoire, la gastronomie, la géographie ou le patrimoine du département {cible}."
         user_prompt = f"""
-Zone : {cible}
-Données disponibles :
+Département : {cible}
+Commune : {commune}
+Données :
 - Mérimée : {src_m}
 - Overpass : {src_o}
 - Wikipédia : {src_w}
 
 Renvoie un JSON :
 {{
-  "question": "Question de quiz précise (avec nom propre ou date) sur {cible} + Je vous laisse 10 secondes !",
+  "question": "Question de quiz précise sur le département {cible} + Je vous laisse 10 secondes !",
   "reponse": "Explication factuelle précise avec dates et noms propres."
 }}
 """
@@ -331,9 +331,9 @@ async def ask_question(req: QuestionRequest, request: Request):
 Tu es un guide vocal réactif.
 
 RÈGLES STRICTES :
-1. Si l'utilisateur demande où il se trouve : Indique précisément qu'il est à {commune if commune else 'dans la région'}, dans le département de {departement if departement else 'France'}. Ne dis JAMAIS "votre secteur".
+1. Si l'utilisateur demande où il se trouve : Réponds précisément qu'il est dans la commune de {commune if commune else 'votre position'}, dans le département de {departement if departement else 'France'}.
 2. Si l'utilisateur demande de répéter : Réexplique brièvement l'anecdote précédente ("{dernier_sujet}").
-3. Pour toute autre question : Réponds directement avec des faits, noms propres et dates (35 mots max) en croisant les sources locales disponibles.
+3. Pour toute autre question : Réponds directement avec des faits, noms propres et dates (35 mots max) sur le département {departement}.
 """
 
         prompt = f"""
