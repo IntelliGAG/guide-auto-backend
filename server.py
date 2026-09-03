@@ -53,9 +53,10 @@ quiz_state = {
 }
 
 def extraction_infos_geo(addr):
-    """Extrait la commune et le département depuis OSM."""
+    """Extrait la commune et le département depuis les données OSM."""
     commune = (addr.get('village') or addr.get('town') or addr.get('city') 
-               or addr.get('municipality') or addr.get('suburb') or addr.get('hamlet'))
+               or addr.get('municipality') or addr.get('suburb') 
+               or addr.get('hamlet'))
     
     departement = addr.get('county') or addr.get('state_district') or addr.get('state')
     
@@ -66,41 +67,58 @@ def obtenir_infos_locales(lat, lon):
     commune = None
     departement = None
     
-    # Appel OSM
-    url_osm = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=13"
+    # 1. Premier essai OSM Zoom 13
     try:
+        url_osm = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=13"
         res = requests.get(url_osm, headers=headers, timeout=3).json()
         addr = res.get('address', {})
         commune, departement = extraction_infos_geo(addr)
     except Exception as e:
-        print(f"Erreur OSM: {e}")
+        print(f"Erreur OSM Zoom 13: {e}")
 
-    # Secours si commune non trouvée
-    if not commune:
+    # 2. Second essai OSM Zoom 10 (niveau département/canton)
+    if not commune or not departement:
         try:
             url_osm_w = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=10"
             res_w = requests.get(url_osm_w, headers=headers, timeout=3).json()
             addr_w = res_w.get('address', {})
-            commune, departement = extraction_infos_geo(addr_w)
+            c_tmp, d_tmp = extraction_infos_geo(addr_w)
+            if not commune: commune = c_tmp
+            if not departement: departement = d_tmp
         except Exception as e:
             print(f"Erreur OSM Zoom 10: {e}")
 
-    if not commune:
-        commune = "votre secteur"
+    # 3. Secours via API BigDataCloud (gratuite sans clé) si OSM ne renvoie pas le département
     if not departement:
-        departement = "votre département"
+        try:
+            url_bdc = f"https://api.bigdatacloud.net/data/reverse-geocode-client?latitude={lat}&longitude={lon}&localityLanguage=fr"
+            res_bdc = requests.get(url_bdc, timeout=3).json()
+            departement = res_bdc.get('principalSubdivision')
+            if not commune:
+                commune = res_bdc.get('locality') or res_bdc.get('city')
+        except Exception as e:
+            print(f"Erreur BDC: {e}")
 
-    # Wikipédia sur le département pour donner du fond culturel à l'IA
-    wiki_dept = ""
-    try:
-        url_wiki = f"https://fr.wikipedia.org/api/rest_v1/page/summary/{departement}"
-        res_w = requests.get(url_wiki, headers=headers, timeout=3)
-        if res_w.status_code == 200:
-            wiki_dept = res_w.json().get('extract', '')
-    except Exception as e:
-        print(f"Erreur Wiki Dept: {e}")
+    # Nettoyage strict des variables pour éviter de transmettre des mots génériques à l'IA
+    if commune and ("secteur" in commune.lower() or "environnant" in commune.lower()):
+        commune = None
 
-    return commune, departement, wiki_dept
+    if departement and ("département" in departement.lower() or "votre" in departement.lower()):
+        departement = None
+
+    # Extrait Wikipédia pour donner du contexte réel
+    wiki_context = ""
+    target_search = commune or departement
+    if target_search:
+        try:
+            url_wiki = f"https://fr.wikipedia.org/api/rest_v1/page/summary/{target_search}"
+            res_w = requests.get(url_wiki, headers=headers, timeout=3)
+            if res_w.status_code == 200:
+                wiki_context = res_w.json().get('extract', '')
+        except Exception as e:
+            print(f"Erreur Wiki: {e}")
+
+    return commune, departement, wiki_context
 
 @app.post("/reset")
 async def reset_session():
@@ -124,23 +142,27 @@ async def generate_story(req: LocationRequest, request: Request):
     global session_state
     try:
         lat, lon = req.latitude, req.longitude
-        commune, departement, wiki_dept = obtenir_infos_locales(lat, lon)
+        commune, departement, wiki_context = obtenir_infos_locales(lat, lon)
 
-        # Gestion des consignes d'introduction et de transition
+        # Construction de la consigne d'accroche sans phrases génériques
         consigne_position = ""
         if session_state["current_commune"] is None:
-            # Première intervention
-            consigne_position = f"C'est ta TOUTE PREMIÈRE intervention. Indique obligatoirement à l'usager dans quelle commune ({commune}) et quel département ({departement}) il se trouve pour le situer."
-        elif session_state["current_commune"] != commune:
-            # Changement de commune
+            if commune and departement:
+                consigne_position = f"TOUTE PREMIÈRE INTERVENTION : Commence exactement par 'Bienvenue à {commune}, dans le département de {departement}'."
+            elif commune:
+                consigne_position = f"TOUTE PREMIÈRE INTERVENTION : Commence exactement par 'Bienvenue à {commune}'."
+            elif departement:
+                consigne_position = f"TOUTE PREMIÈRE INTERVENTION : Commence exactement par 'Bienvenue dans le département de {departement}'."
+            else:
+                consigne_position = "TOUTE PREMIÈRE INTERVENTION : Commence directement par présenter la région où l'usager circule sans formule bancale."
+        elif commune and session_state["current_commune"] != commune:
             ancienne = session_state["current_commune"]
-            consigne_position = f"L'utilisateur vient de changer de ville ! Utilise IMPÉRATIVEMENT une phrase du style : 'Nous venons de quitter {ancienne} et entrons dans la commune de {commune}'."
+            consigne_position = f"Changement de commune : Commence exactement par 'Nous venons de quitter {ancienne} et entrons dans la commune de {commune}'."
             session_state["queue_categories"] = list(CATEGORIES_BASE)
 
-        session_state["current_commune"] = commune
-        session_state["current_departement"] = departement
+        session_state["current_commune"] = commune if commune else session_state["current_commune"]
+        session_state["current_departement"] = departement if departement else session_state["current_departement"]
 
-        # Gestion de la boucle des thèmes
         if not session_state["queue_categories"]:
             session_state["queue_categories"] = list(CATEGORIES_BASE)
             
@@ -148,23 +170,25 @@ async def generate_story(req: LocationRequest, request: Request):
         historique_texte = "\n".join([f"- {h}" for h in session_state["stories_history"]]) if session_state["stories_history"] else "Aucune."
 
         system_instruction = f"""
-Tu es un guide touristique vocal de voiture, passionnant, cultivé et captivant.
+Tu es un guide touristique vocal de voiture, passionné, érudit et très concrét.
 
-CONSIGNES DE NARRATION :
-1. LOCALISATION : {consigne_position if consigne_position else f"Nous sommes toujours dans la commune de {commune} ({departement})."}
-2. PÉRIMÈTRE THÉMATIQUE : Tu parles du DÉPARTEMENT ({departement}) et de la commune ({commune}). Tu peux aborder les monuments, faits historiques, spécialités culinaires/viticoles, zones naturelles ou toute anecdote culturelle captivante sur ce département.
-3. RÈGLE STRICTE ANTI-RÉPÉTITION : Ne répète JAMAIS deux fois la même information ou anecdote déjà dite. Voici ce que tu as DÉJÀ raconté à l'utilisateur :
+RÈGLES D'OR ABSOLUES :
+1. ACCROCHE : {consigne_position}
+2. INTERDICTION DES PHRASES CREUSES OU FLOUES : Ne dis JAMAIS "il y a un fleuve", "un monument se trouve ici", "votre secteur" ou "votre département". Tu dois OBLIGATOIREMENT donner des NOMS PROPRES (ex: La Loire, le château de X, le vignoble du Muscadet, etc.).
+3. PÉRIMÈTRE : Fais appel à ta culture générale sur le département ({departement if departement else 'de la région actuelle'}) ou la commune ({commune if commune else 'locale'}).
+4. ANTI-RÉPÉTITION : Ne répète jamais ce qui a déjà été dit :
 {historique_texte}
-4. TON : Reste fluide, naturel et agréable à écouter en voiture (environ 40 à 50 mots).
+5. FORMAT : Récit direct, fluide et vivant de 40 à 50 mots.
 """
 
         user_prompt = f"""
-Commune : {commune}
-Département : {departement}
-Thème orienté : {categorie_cible}
-Ressource Wikipédia départementale : "{wiki_dept}"
+Coordonnées GPS : Lat {lat}, Lon {lon}
+Commune identifiée : {commune if commune else 'Non spécifiée'}
+Département identifié : {departement if departement else 'Non spécifié'}
+Thème imposé : {categorie_cible}
+Extrait Wikipédia : "{wiki_context}"
 
-Rédige une anecdote intéressante et vivante à lire à voix haute.
+Rédige une anecdote captivante truffée de noms propres et de détails réels.
 """
 
         response_text = client_openai.chat.completions.create(
@@ -180,7 +204,7 @@ Rédige une anecdote intéressante et vivante à lire à voix haute.
 
         return {
             "text": texte_guide,
-            "commune": commune
+            "commune": commune if commune else (departement if departement else "Votre route")
         }
 
     except Exception as e:
@@ -191,18 +215,18 @@ Rédige une anecdote intéressante et vivante à lire à voix haute.
 async def get_quiz_question(req: LocationRequest, request: Request):
     global quiz_state
     try:
-        commune, departement, wiki_dept = obtenir_infos_locales(req.latitude, req.longitude)
+        commune, departement, wiki_context = obtenir_infos_locales(req.latitude, req.longitude)
+        cible = departement or commune or "la région"
         
-        system_instruction = f"Tu es un animateur de quiz touristique. Pose une question amusante ou intéressante sur l'histoire, la gastronomie, la géographie ou les monuments du département ({departement}) ou de la commune ({commune})."
+        system_instruction = f"Tu es un animateur de quiz radio. Pose une question précise avec des noms propres sur l'histoire, la gastronomie ou la géographie de {cible}."
         user_prompt = f"""
-Commune : {commune}
-Département : {departement}
-Contexte : {wiki_dept}
+Secteur : {cible}
+Extrait : {wiki_context}
 
 Renvoie un JSON :
 {{
-  "question": "Question de quiz captivante + Je vous laisse 10 secondes !",
-  "reponse": "Explication claire et complète de la réponse."
+  "question": "Question de quiz précise sur {cible} + Je vous laisse 10 secondes !",
+  "reponse": "Réponse complète avec noms propres."
 }}
 """
 
@@ -243,19 +267,19 @@ async def ask_question(req: QuestionRequest, request: Request):
         dernier_sujet = session_state["stories_history"][-1] if session_state["stories_history"] else "Aucun sujet récent."
 
         system_instruction = f"""
-Tu es un guide vocal réactif en voiture.
+Tu es un guide vocal en voiture.
 
-CONSIGNES STRICTES :
-1. Si l'utilisateur demande où il est (ex: "Où suis-je ?", "Quelle commune ?"), tu dois OBLIGATOIREMENT lui indiquer sa commune ({commune}) ET son département ({departement}).
-2. Si l'utilisateur demande de répéter ou de réexpliquer une information précédente, tu as exceptionnellement le droit de la répéter.
-3. Si l'utilisateur pose une autre question, réponds de manière concise (35-40 mots max) en t'appuyant sur ta culture générale du département ({departement}).
+RÈGLES DE RÉPONSE :
+1. Si l'utilisateur demande où il est : Donne les noms propres réels de la commune ({commune}) et du département ({departement}). Ne dis JAMAIS "votre secteur" ou "votre département".
+2. Si l'utilisateur demande de répéter : Réexplique brièvement le dernier sujet ("{dernier_sujet}").
+3. Pour toute autre question : Réponds concisément (35 mots max) avec des détails réels sur le département de {departement if departement else 'la région'}.
 """
 
         prompt = f"""
-Localisation : Commune de {commune}, Département {departement}.
-Dernière anecdote donnée par le guide : "{dernier_sujet}"
-
-Question posée par l'utilisateur : "{req.question}"
+Commune : {commune}
+Département : {departement}
+Dernier sujet : "{dernier_sujet}"
+Question utilisateur : "{req.question}"
 """
 
         response_text = client_openai.chat.completions.create(
