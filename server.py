@@ -79,14 +79,14 @@ def obtenir_infos_locales(lat, lon, heading=-1.0, elargir_trajectoire=False):
     try:
         res = requests.get(url_osm, headers=headers, timeout=3).json()
         addr = res.get('address', {})
-        # Recherche élargie du nom exact pour éviter "cette localité"
         commune = (addr.get('village') or addr.get('town') or addr.get('city') 
-                   or addr.get('municipality') or addr.get('suburb') or addr.get('county'))
+                   or addr.get('municipality') or addr.get('suburb') 
+                   or addr.get('county') or addr.get('state_district'))
     except Exception as e:
         print(f"Erreur OSM: {e}")
 
     if not commune:
-        commune = "cette zone"
+        commune = "Secteur environnant"
 
     commune_a_venir = None
     if elargir_trajectoire and heading >= 0:
@@ -196,10 +196,15 @@ async def generate_story(req: LocationRequest, request: Request):
             lat, lon, heading, elargir_trajectoire=elargir
         )
 
-        changement_commune_prompt = ""
-        if session_state["current_commune"] and session_state["current_commune"] != commune:
-            changement_commune_prompt = f"Nous changeons de commune : commence par indiquer 'Nous arrivons à {commune}'."
+        # Construction de la consigne d'amorce systématique
+        amorce_instruction = ""
+        if session_state["current_commune"] is None:
+            amorce_instruction = f"C'est la toute première intervention : commence obligatoirement ta phrase par 'Nous sommes à {commune}' ou 'Bienvenue à {commune}'."
+        elif session_state["current_commune"] != commune:
+            amorce_instruction = f"Nouvelle commune détectée : commence obligatoirement ta phrase par 'Nous arrivons à {commune}'."
             session_state["queue_categories"] = list(CATEGORIES_BASE)
+        else:
+            amorce_instruction = f"Commence obligatoirement ta phrase en nommant la ville (ex: 'À {commune}, ...' ou 'Ici à {commune}, ...')."
 
         session_state["current_commune"] = commune
         session_state["last_lat"] = lat
@@ -227,10 +232,10 @@ INTERDICTION d'évoquer des communes dans la direction opposée.
 Tu es un guide vocal de voiture passionnant, précis et très bien informé sur la France (terroir, histoire, grandes entreprises, géographie, culture).
 
 RÈGLES NARRATIVES STRICTES :
-1. NOM DE LA ZONE : {changement_commune_prompt if changement_commune_prompt else f'Nous sommes dans la zone de {commune}.'} Ne dis JAMAIS "cette localité" ou "cette commune", nomme toujours la ville ou la région explicitement ({commune}).
+1. OBLIGATION D'AMORCE : {amorce_instruction} Il est STRICTEMENT INTERDIT de faire une intervention sans prononcer le nom propre '{commune}'.
 2. PAS DE BANALITÉ NI DE PHRASE CREUSE : Ne dis JAMAIS "il n'y a pas de monument", "cette ville a une riche histoire" ou des généralités vagues. Va DROIT AUX FAITS CONCRETS.
-3. CONNAISSANCE DU TERROIR ET DU PATRIMOINE : Utilise les sources fournies, MAIS complète librement avec ta culture générale sur le secteur de {commune} (appellations viticoles comme le Muscadet, industries emblématiques comme LU, histoire locale, étymologie du nom, rivières, spécialités culinaires).
-4. ÉLARGISSEMENT : Si la commune est petite ou manque de faits majeurs, parle immédiatement de l'histoire du canton, du bassin industriel/viticole environnant ou de la grande ville/rivière la plus proche.
+3. CONNAISSANCES DE TERROIR : Utilise les sources fournies, MAIS complète librement avec ta culture générale sur {commune} (appellations viticoles, industries emblématiques, histoire locale, étymologie, rivières, spécialités culinaires).
+4. ÉLARGISSEMENT : Si la commune est petite ou manque de faits majeurs, parle immédiatement du canton, du bassin industriel/viticole environnant ou de la grande ville/rivière la plus proche.
 5. {instruction_trajectoire if instruction_trajectoire else 'Reste concentré sur le secteur.'}
 6. ORIENTATION : {orientation_instruction}
 7. Ne répète jamais ces anecdotes récentes :
@@ -246,7 +251,7 @@ SOURCE 2 (Monuments) : "{source_merimee}"
 SOURCE 3 (Proximité) : "{source_proche}"
 {"SOURCE 4 (Prochaine commune - " + str(commune_fwd) + ") : \"" + str(wiki_fwd) + "\"" if elargir and wiki_fwd else ""}
 
-CONSIGNE : Donne une anecdote ultra-concrète (35-40 mots max) sur {commune} ou son secteur immédiat liée au thème "{categorie_cible}". 
+CONSIGNE : Rédige l'anecdote (45-50 mots max) en respectant STRICTEMENT l'amorce demandée citant le nom propre '{commune}'.
 Cite des détails précis : noms de cépages/vins, entreprises historiques, rivières, origine du nom de la ville ou faits marquants.
 """
 
@@ -276,7 +281,7 @@ async def get_quiz_question(req: LocationRequest, request: Request):
     try:
         commune, wiki_summary, source_merimee, source_proche, _, _ = obtenir_infos_locales(req.latitude, req.longitude, req.heading)
         
-        system_instruction = "Tu es un animateur de quiz radio. Pose une question précise sur une histoire, une spécialité ou un fait marquant lié au secteur."
+        system_instruction = f"Tu es un animateur de quiz radio. Pose une question précise sur une histoire, une spécialité ou un fait marquant lié à la ville de {commune}."
         user_prompt = f"""
 Commune : {commune}
 SOURCE 1 : "{wiki_summary}"
@@ -285,7 +290,7 @@ SOURCE 3 : "{source_proche}"
 
 Renvoie un JSON :
 {{
-  "question": "Question précise sur {commune} ou sa région + Je vous laisse 10 secondes !",
+  "question": "Question précise citant la ville de {commune} + Je vous laisse 10 secondes !",
   "reponse": "Explication factuelle avec noms propres exacts."
 }}
 """
@@ -333,13 +338,14 @@ async def ask_question(req: QuestionRequest, request: Request):
 Tu es un guide vocal réactif. L'utilisateur te pose une question directe à l'oral pendant qu'il conduit.
 
 CONSIGNES STRICTES :
-1. Si l'utilisateur demande 'dans quelle commune se trouve-t-on', réponds uniquement avec le nom : {commune}.
-2. Si l'utilisateur demande des précisions, approfondis le sujet en utilisant la culture générale de la région de {commune}.
-3. Sois ultra-concis (35 mots max) et captivant.
+1. Si l'utilisateur demande 'dans quelle commune se trouve-t-on' ou une question sur sa position, RÉPONDS DIRECTEMENT avec le NOM PROPRE DE LA VILLE : {commune}.
+2. INTERDICTION STRICTE de répondre des mots vagues comme "cette zone", "cette localité" ou "cette commune". Donne TOUJOURS le nom réel : {commune}.
+3. Si l'utilisateur demande des précisions sur le dernier sujet évoqué ("{dernier_sujet}"), approfondis en utilisant ta culture générale sur le secteur de {commune}.
+4. Sois ultra-concis (35 mots max) et captivant.
 """
 
         prompt = f"""
-Localisation : {commune}
+Localisation actuelle : {commune}
 Cap GPS véhicule : {req.heading}
 Dernier sujet évoqué par le guide : "{dernier_sujet}"
 
@@ -356,7 +362,7 @@ Question orale de l'utilisateur : "{req.question}"
                 {"role": "system", "content": system_instruction},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.2
+            temperature=0.1
         )
         texte_reponse = response_text.choices[0].message.content
 
