@@ -212,20 +212,23 @@ async def generate_story(req: LocationRequest, request: Request):
         lat, lon = req.latitude, req.longitude
         commune, departement, src_merimee, src_overpass, src_wiki = interroger_toutes_les_sources(lat, lon)
 
+        ancienne_commune = session_state["current_commune"]
+        
         consigne_position = ""
-        if session_state["current_commune"] is None:
+        if ancienne_commune is None:
             if commune and departement:
                 consigne_position = f"TOUTE PREMIÈRE INTERVENTION : Commence exactement par 'Bienvenue à {commune}, dans le département de {departement}.'"
             elif commune:
                 consigne_position = f"TOUTE PREMIÈRE INTERVENTION : Commence exactement par 'Bienvenue à {commune}.'"
             else:
                 consigne_position = f"TOUTE PREMIÈRE INTERVENTION : Commence exactement par 'Bienvenue dans le département de {departement}.'"
-        elif commune and session_state["current_commune"] != commune:
-            ancienne = session_state["current_commune"]
-            consigne_position = f"Changement de commune : Commence exactement par 'Nous venons de quitter {ancienne} et entrons dans la commune de {commune}.'"
+        elif commune and ancienne_commune != commune:
+            consigne_position = f"Changement de commune : Commence exactement par 'Nous venons de quitter {ancienne_commune} et entrons dans la commune de {commune}.'"
             session_state["queue_categories"] = list(CATEGORIES_BASE)
+        else:
+            consigne_position = "INTERVENTION CONTINUE : Ne mentionne AUCUNE localisation ou nom de commune. Plonge directement et immédiatement dans l'anecdote historique ou patrimoniale."
 
-        session_state["current_commune"] = commune if commune else session_state["current_commune"]
+        session_state["current_commune"] = commune if commune else ancienne_commune
         session_state["current_departement"] = departement
 
         if not session_state["queue_categories"]:
@@ -240,7 +243,7 @@ Tu es un guide vocal touristique et historique captivant, direct et très bien d
 RÈGLES STRICTES DE NARRATION ET DE GÉOGRAPHIE :
 1. ACCROCHE : {consigne_position}
 2. PRÉCISION GÉOGRAPHIQUE STRICTE : Tu dois impérativement respecter le département réel '{departement}'. Ne mélange jamais avec les départements voisins.
-3. LARGEUR DÉPARTEMENTALE OBLIGATOIRE : La commune ({commune}) sert uniquement d'amorce d'arrivée. Il est STRICTEMENT INTERDIT de boucler l'anecdote sur les micro-détails de cette seule commune. Raconte un événement, une bataille, une tradition ou un monument majeur situé AILLEURS dans le département de {departement} pour voir plus large.
+3. LARGEUR DÉPARTEMENTALE OBLIGATOIRE : Raconte un événement, une bataille, une tradition ou un monument majeur situé dans le département de {departement} pour voir plus large.
 4. CROISEMENT DE SOURCES : Utilise au moins 2 sources parmi les 4 fournies.
 5. STYLE FACTUEL :
    - Donne des DATES, DES NOMS PROPRES et des faits précis.
@@ -260,7 +263,7 @@ SOURCE 1 (Mérimée) : "{src_merimee}"
 SOURCE 2 (Overpass) : "{src_overpass}"
 SOURCE 3 (Wikipédia) : "{src_wiki}"
 
-CONSIGNE : Rédige une anecdote sur le thème "{categorie_cible}" en élargissant à l'échelle globale du département {departement}, tout en respectant l'amorce citant la ville de {commune}. Noms propres et dates exigés.
+CONSIGNE : Rédige une anecdote sur le thème "{categorie_cible}" en élargissant à l'échelle globale du département {departement}, en respectant la consigne d'accroche ci-dessus. Noms propres et dates exigés.
 """
 
         response_text = client_openai.chat.completions.create(
