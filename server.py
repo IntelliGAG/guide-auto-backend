@@ -16,7 +16,7 @@ ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "sk_026bfc79a7632eb4102ba55
 client_openai = OpenAI(api_key=OPENAI_API_KEY)
 client_eleven = ElevenLabs(api_key=ELEVENLABS_API_KEY)
 
-# ID de la voix "George" (100% autorisée via API gratuite)
+# ID de la voix "George"
 VOICE_ID = "JBFqnCBsd6RMkjVDRZzb"
 
 app = FastAPI()
@@ -39,11 +39,11 @@ class QuestionRequest(BaseModel):
     question: str
 
 CATEGORIES_BASE = [
-    "Origine du nom de la commune, étymologie ou tradition gastronomique historique",
-    "Patrimoine bâti, monuments réels, architecture ou curiosités",
-    "Histoire locale, personnages historiques ou événements marquants",
+    "Origine du nom de la commune, étymologie précise ou tradition gastronomique certifiée",
+    "Patrimoine bâti, monuments réels identifiés, architecture ou curiosités précises",
+    "Histoire locale factuelle, personnages historiques nommés ou événements précis",
     "Géographie, cours d'eau nommés précisément, reliefs et environnement naturel",
-    "Économie historique, terroir et traditions viticoles"
+    "Économie historique, terroir et traditions viticoles identifiées"
 ]
 
 session_state = {
@@ -152,20 +152,24 @@ async def generate_story(req: LocationRequest, request: Request):
         historique_texte = "\n".join([f"- {h}" for h in session_state["stories_history"]]) if session_state["stories_history"] else "Aucun."
 
         system_instruction = f"""
-Tu es un guide vocal de voiture ultra-précis et factuel.
-RÈGLES ABSOLUES :
+Tu es un guide vocal de voiture ultra-précis, rigoureux et factuel.
+
+CONSIGNES STRICTES DE FACTUALITÉ ET PRÉCISION :
 1. {changement_commune_prompt if changement_commune_prompt else f'Cite la commune de {commune} au moins une fois de façon naturelle.'}
-2. PRÉCISION STRICTE : Nomme TOUJOURS précisément les châteaux, églises ou cours d'eau.
-3. N'INVENTE RIEN. Si un détail manque dans la source, ne le brode pas.
-4. Évite les répétitions avec cet historique :
+2. PAS DE GÉNÉRALITÉS : Interdiction absolue d'utiliser des formules vagues ("des personnages connus", "un bâtiment ancien", "plusieurs histoires", "certains auteurs"). Si tu évoques un personnage, une église, un château ou une rivière, tu DOIS impérativement citer son NOM PROPRE EXACT.
+3. DOUBLE VÉRIFICATION : Ne mentionne un fait historique, une date ou un personnage QUE si l'information est croisée et confirmée par au moins 2 sources sûres (ta base + Wikipédia). Si tu as un doute sur un détail, ne le dis pas.
+4. N'INVENTE RIEN. Ne brode aucun fait fictif.
+5. Si aucun fait historique précis n'est disponible sur le thème pour cette commune, parle de la géographie locale (rivières, relief, culture viticole) avec des termes précis et exacts.
+6. Évite les répétitions avec cet historique :
 {historique_texte}
 """
 
         user_prompt = f"""
 Commune : {commune}
 Thème : {categorie_cible}
-Source : "{wiki_summary}"
-Rédige une anecdote orale courte (40 mots max).
+Source officielle : "{wiki_summary}"
+
+Rédige une anecdote orale courte (40 mots max) hyper-précise et factuelle.
 """
 
         response_text = client_openai.chat.completions.create(
@@ -174,7 +178,7 @@ Rédige une anecdote orale courte (40 mots max).
                 {"role": "system", "content": system_instruction},
                 {"role": "user", "content": user_prompt}
             ],
-            temperature=0.3
+            temperature=0.1
         )
         texte_guide = response_text.choices[0].message.content
 
@@ -202,12 +206,13 @@ async def get_quiz_question(req: LocationRequest, request: Request):
         historique_quiz = "\n".join([f"- {q}" for q in quiz_state["quiz_history"]]) if quiz_state["quiz_history"] else "Aucune."
 
         system_instruction = """
-Tu es un animateur de quiz radio en voiture.
+Tu es un animateur de quiz radio en voiture rigoureux et factuel.
 RÈGLES ABSOLUES :
-1. Interdiction de poser une question administrative basique sur le département/région sauf si c'est la seule info disponible.
-2. Varie les sujets : spécialités gastronomiques, géographie, histoire, monuments ou terroir.
-3. Il est STRICTEMENT INTERDIT de poser une question similaire aux questions précédentes listées dans l'historique.
-4. Génère UNIQUEMENT la question et termine par une phrase d'attente (ex: "Je vous laisse 10 secondes pour y réfléchir !").
+1. Pose des questions fondées sur des faits exacts, vérifiables et précis (noms propres, spécialités exactes, faits historiques croisés).
+2. Interdiction de poser une question administrative basique ou vague.
+3. Ne brode aucun élément inventé dans la question ou la réponse.
+4. Il est STRICTEMENT INTERDIT de poser une question similaire aux questions précédentes listées dans l'historique.
+5. Génère UNIQUEMENT la question et termine par une phrase d'attente (ex: "Je vous laisse 10 secondes pour y réfléchir !").
 """
 
         user_prompt = f"""
@@ -217,11 +222,11 @@ SOURCE OFFICIELLE : "{wiki_summary}"
 HISTORIQUE DES QUESTIONS DÉJÀ POSÉES (À NE PAS RÉPÉTER) :
 {historique_quiz}
 
-Propose une NOUVELLE question originale et intéressante.
+Propose une NOUVELLE question originale, basée sur un fait historique ou géographique très précis.
 Renvoie un objet JSON :
 {{
   "question": "La question + phrase d'attente",
-  "reponse": "La réponse détaillée + 'Prêt pour la question suivante ?'"
+  "reponse": "La réponse détaillée avec les noms propres exacts + 'Prêt pour la question suivante ?'"
 }}
 """
 
@@ -232,7 +237,7 @@ Renvoie un objet JSON :
                 {"role": "user", "content": user_prompt}
             ],
             response_format={"type": "json_object"},
-            temperature=0.5
+            temperature=0.2
         )
         
         data = json.loads(response.choices[0].message.content)
@@ -277,10 +282,11 @@ async def ask_question(req: QuestionRequest, request: Request):
         commune, wiki_summary = obtenir_infos_commune(req.latitude, req.longitude)
         
         system_instruction = """
-Tu es un guide vocal. L'utilisateur te pose une question directe pendant qu'il conduit.
+Tu es un guide vocal ultra-factuel. L'utilisateur te pose une question directe pendant qu'il conduit.
 RÈGLES ANTI-HALLUCINATION STRICTES :
-1. Utilise systématiquement des formules de précaution : "D'après mes informations...", "À ma connaissance...".
-2. Si tu n'as pas l'information exacte dans la source, dis clairement : "À ma connaissance, il n'y a pas d'information précise sur ce sujet ici."
+1. Cites des faits précis et des noms propres. Ne fais pas de phrases vagues ou meublantes.
+2. N'utilise que des faits historiques ou géographiques croisés et vérifiés à 100%.
+3. Si tu n'as pas l'information exacte, dis clairement : "À ma connaissance, il n'y a pas d'information exacte vérifiée sur ce sujet ici."
 """
 
         prompt = f"""
@@ -288,7 +294,7 @@ Localisation : {commune}
 Source : "{wiki_summary}"
 Question de l'utilisateur : "{req.question}"
 
-Réponds directement de manière concise (30 à 40 mots max).
+Réponds directement de manière concise (30 à 40 mots max) avec des précisions exactes.
 """
 
         response_text = client_openai.chat.completions.create(
