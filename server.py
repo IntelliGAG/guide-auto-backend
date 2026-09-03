@@ -53,13 +53,32 @@ quiz_state = {
 }
 
 def extraction_infos_geo(addr):
-    """Extrait la commune et le département depuis OSM."""
+    """Extrait la commune et le département depuis OSM avec filtrage strict des régions."""
     commune = (addr.get('village') or addr.get('town') or addr.get('city') 
                or addr.get('municipality') or addr.get('suburb') 
                or addr.get('hamlet'))
     
-    departement = addr.get('county') or addr.get('state_district') or addr.get('state')
+    # On cherche le département dans 'county' en priorité
+    departement = addr.get('county') or addr.get('state_district')
     
+    # Si le champ renvoie la Région "Pays de la Loire", on tente de corriger avec le code postal
+    postcode = addr.get('postcode', '')
+    if postcode and len(postcode) >= 2:
+        code_dept = postcode[:2]
+        depts_map = {
+            "44": "Loire-Atlantique",
+            "49": "Maine-et-Loire",
+            "53": "Mayenne",
+            "72": "Sarthe",
+            "85": "Vendée"
+        }
+        if code_dept in depts_map:
+            departement = depts_map[code_dept]
+
+    # Sécurité si toujours pas de département trouvé
+    if not departement and addr.get('state') and "pays de la loire" not in addr.get('state').lower():
+        departement = addr.get('state')
+
     if commune:
         c_low = commune.lower()
         if "secteur" in c_low or "environnant" in c_low or "localité" in c_low or "votre" in c_low:
@@ -67,8 +86,10 @@ def extraction_infos_geo(addr):
 
     if departement:
         d_low = departement.lower()
-        if "département" in d_low or "votre" in d_low or "secteur" in d_low:
-            departement = None
+        if "département" in d_low or "votre" in d_low or "secteur" in d_low or "pays de la loire" in d_low:
+            # Si "Pays de la Loire" subsiste, on force Loire-Atlantique par défaut sur le secteur 44
+            if "pays de la loire" in d_low:
+                departement = "Loire-Atlantique"
 
     return commune, departement
 
@@ -103,8 +124,10 @@ def interroger_toutes_les_sources(lat, lon):
             url_bdc = f"https://api.bigdatacloud.net/data/reverse-geocode-client?latitude={lat}&longitude={lon}&localityLanguage=fr"
             res_bdc = requests.get(url_bdc, timeout=3).json()
             d_bdc = res_bdc.get('principalSubdivision')
-            if d_bdc and "département" not in d_bdc.lower():
+            if d_bdc and "pays de la loire" not in d_bdc.lower():
                 departement = d_bdc
+            else:
+                departement = "Loire-Atlantique"
             if not commune:
                 c_bdc = res_bdc.get('locality') or res_bdc.get('city')
                 if c_bdc and "secteur" not in c_bdc.lower():
@@ -155,7 +178,7 @@ def interroger_toutes_les_sources(lat, lon):
 
     source_overpass_txt = f"Points d'intérêt Overpass : {', '.join(lieux_overpass)}" if lieux_overpass else "Aucun lieu Overpass immédiat."
 
-    # SOURCE 4 : Wikipédia API (Focus prioritaire sur le Département)
+    # SOURCE 4 : Wikipédia API (Focus sur le Département)
     wiki_context = ""
     target_search = departement or commune
     if target_search:
@@ -223,10 +246,10 @@ async def generate_story(req: LocationRequest, request: Request):
         system_instruction = f"""
 Tu es un guide vocal touristique et historique captivant, direct et très bien documenté.
 
-RÈGLES DE NARRATION ET ÉLARGISSEMENT DÉPARTEMENTAL :
+RÈGLES DE NARRATION ET PRÉCISION GÉOGRAPHIQUE :
 1. ACCROCHE : {consigne_position}
-2. PORTÉE DÉPARTEMENTALE OBLIGATOIRE : L'utilisateur se trouve dans la commune de '{commune if commune else 'locale'}' située dans le département '{departement if departement else 'actuel'}'. Tu peux et DOIS aborder des sujets historiques, des monuments, des faits d'armes, la gastronomie ou les paysages provenant de TOUT LE DÉPARTEMENT DE {departement}, et pas seulement restreints à la commune exacte.
-3. CROISEMENT DE SOURCES : Utilise au moins 2 sources parmi celles fournies (Mérimée, Overpass, Wikipédia ou ta culture générale sur {departement}).
+2. PRÉCISION DÉPARTEMENTALE : Le DÉPARTEMENT est '{departement}' (ATTENTION : 'Pays de la Loire' est une Région, NE DIS JAMAIS 'le département des Pays de la Loire'). Tu peux et DOIS aborder des faits historiques, monuments, batailles, spécialités ou paysages de TOUT LE DÉPARTEMENT de {departement}.
+3. CROISEMENT DE SOURCES : Utilise au moins 2 sources parmi celles fournies (Mérimée, Overpass, Wikipédia ou ta culture générale sur le département {departement}).
 4. STYLE DIRECT ET FACTUEL :
    - Donne des DATES, DES NOMS PROPRES, DES PERSONNAGES HISTORIQUES et DES LIEUX DÉPARTEMENTAUX PRÉCIS.
    - Pas de questions rhétoriques ("Saviez-vous que...").
@@ -237,15 +260,15 @@ RÈGLES DE NARRATION ET ÉLARGISSEMENT DÉPARTEMENTAL :
 """
 
         user_prompt = f"""
-Commune actuelle (point GPS) : {commune if commune else 'Non spécifiée'}
-Département global à traiter : {departement if departement else 'Non spécifié'}
+Commune actuelle : {commune if commune else 'Non spécifiée'}
+Département exact : {departement if departement else 'Non spécifié'}
 Thème imposé : {categorie_cible}
 
 SOURCE 1 (Mérimée) : "{src_merimee}"
 SOURCE 2 (Overpass) : "{src_overpass}"
 SOURCE 3 (Wikipédia Départemental) : "{src_wiki}"
 
-CONSIGNE : Rédige une anecdote sur le thème "{categorie_cible}" en piochant dans le patrimoine global du DÉPARTEMENT {departement}, tout en respectant l'amorce qui cite la commune de {commune}. Noms propres et dates exigés.
+CONSIGNE : Rédige une anecdote sur le thème "{categorie_cible}" en piochant dans le patrimoine du DÉPARTEMENT {departement}, tout en respectant l'amorce qui cite la commune de {commune}. Noms propres et dates exigés.
 """
 
         response_text = client_openai.chat.completions.create(
@@ -275,7 +298,7 @@ async def get_quiz_question(req: LocationRequest, request: Request):
         commune, departement, src_m, src_o, src_w = interroger_toutes_les_sources(req.latitude, req.longitude)
         cible = departement or commune or "la région"
         
-        system_instruction = f"Tu es un animateur de quiz. Pose une question précise sur l'histoire, la gastronomie, la géographie ou le patrimoine du département {cible}."
+        system_instruction = f"Tu es un animateur de quiz. Pose une question précise sur l'histoire, la gastronomie, la géographie ou le patrimoine du département {cible} (Rappel : {cible} est un département, pas une région)."
         user_prompt = f"""
 Département : {cible}
 Commune : {commune}
@@ -331,7 +354,7 @@ async def ask_question(req: QuestionRequest, request: Request):
 Tu es un guide vocal réactif.
 
 RÈGLES STRICTES :
-1. Si l'utilisateur demande où il se trouve : Réponds précisément qu'il est dans la commune de {commune if commune else 'votre position'}, dans le département de {departement if departement else 'France'}.
+1. Si l'utilisateur demande où il se trouve : Réponds précisément qu'il est dans la commune de {commune if commune else 'votre position'}, dans le département de {departement if departement else 'Loire-Atlantique'}.
 2. Si l'utilisateur demande de répéter : Réexplique brièvement l'anecdote précédente ("{dernier_sujet}").
 3. Pour toute autre question : Réponds directement avec des faits, noms propres et dates (35 mots max) sur le département {departement}.
 """
